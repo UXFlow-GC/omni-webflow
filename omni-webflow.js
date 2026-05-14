@@ -14,7 +14,7 @@
  *     debug: false                    // optional
  *   };
  * </script>
- * <script src="https://cdn.jsdelivr.net/gh/UXFlow-GC/omni-webflow@v1.0.0/omni-webflow.js" defer></script>
+ * <script src="https://cdn.jsdelivr.net/gh/UXFlow-GC/omni-webflow@v1.0.1/omni-webflow.js" defer></script>
  *
  * Public API:
  *   window.Omni.ready()
@@ -82,10 +82,10 @@
   }
 
   async function trackPageViewed(extra) {
-    if (state.pageTracked && !extra?.allowDuplicate) return null;
+    if (state.pageTracked && !(extra && extra.allowDuplicate)) return null;
     state.pageTracked = true;
 
-    return sendEvent(Object.assign(baseEvent("page_viewed"), {
+    var payload = Object.assign(await baseEvent("page_viewed"), {
       host_name: window.location.hostname,
       page_slug: window.location.pathname || "/",
       user_agent: navigator.userAgent || "",
@@ -93,11 +93,13 @@
       language: navigator.language || "",
       params: getLandingParams(),
       cookies: getAdCookies()
-    }, stripInternalOptions(extra)));
+    }, stripInternalOptions(extra));
+
+    return sendEvent(removeUndefined(payload));
   }
 
   async function trackCheckoutStarted(data) {
-    var payload = Object.assign(baseEvent("checkout_started"), {
+    var payload = Object.assign(await baseEvent("checkout_started"), {
       total_price: numberOrZero(data && data.total_price),
       currency: upper(data && data.currency, config.defaultCurrency),
       item_count: numberOrZero(data && data.item_count),
@@ -112,7 +114,10 @@
       language: navigator.language || "",
       params: getLandingParams(),
       cookies: getAdCookies(),
-      items: Array.isArray(data && data.items) ? data.items : undefined
+      items: normalizeCheckoutStartedItems(
+        data && data.items,
+        upper(data && data.currency, config.defaultCurrency)
+      )
     });
 
     return sendEvent(removeUndefined(payload));
@@ -123,7 +128,7 @@
       throw new Error("trackCheckoutCompleted requires data.order_id");
     }
 
-    var payload = Object.assign(baseEvent("checkout_completed"), {
+    var payload = Object.assign(await baseEvent("checkout_completed"), {
       order_id: String(data.order_id),
       total: numberOrZero(data.total),
       subtotal: numberOrZero(data.subtotal),
@@ -143,7 +148,7 @@
       referrer: document.referrer || "",
       params: getLandingParams(),
       cookies: getAdCookies(),
-      items: Array.isArray(data.items) ? data.items : undefined
+      items: normalizeCheckoutCompletedItems(data.items)
     });
 
     return sendEvent(removeUndefined(payload));
@@ -233,6 +238,64 @@
     }
 
     return body.hash;
+  }
+
+  function normalizeCheckoutStartedItems(items, fallbackCurrency) {
+    if (!Array.isArray(items)) return undefined;
+
+    return items.map(function (item) {
+      var currency =
+        item.currency ||
+        item.variant?.price?.currencyCode ||
+        item.finalLinePrice?.currencyCode ||
+        fallbackCurrency;
+
+      var price = numberOrZero(
+        item.price ||
+        item.variant?.price?.amount
+      );
+
+      var quantity = numberOrZero(item.quantity);
+
+      return {
+        id: String(item.id || item.variant_id || item.product_id || ""),
+        quantity: quantity,
+        title: String(item.title || item.product_name || ""),
+        variant: {
+          price: {
+            amount: price,
+            currencyCode: currency
+          }
+        },
+        finalLinePrice: {
+          amount: numberOrZero(
+            item.finalLinePrice?.amount || price * quantity
+          ),
+          currencyCode: currency
+        }
+      };
+    }).filter(function (item) {
+      return item.id && item.quantity > 0;
+    });
+  }
+
+  function normalizeCheckoutCompletedItems(items) {
+    if (!Array.isArray(items)) return undefined;
+
+    return items.map(function (item) {
+      return {
+        product_id: String(item.product_id || item.id || ""),
+        variant_id: String(item.variant_id || item.id || item.product_id || ""),
+        product_name: String(item.product_name || item.title || ""),
+        quantity: numberOrZero(item.quantity),
+        price: numberOrZero(item.price || (item.variant && item.variant.price && item.variant.price.amount))
+      };
+    }).filter(function (item) {
+      return item.product_id &&
+        item.variant_id &&
+        item.product_name &&
+        item.quantity > 0;
+    });
   }
 
   function initializeCompatibilityKeys() {
