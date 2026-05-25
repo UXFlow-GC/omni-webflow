@@ -57,11 +57,12 @@
     trackPageViewed: trackPageViewed,
     trackCheckoutStarted: trackCheckoutStarted,
     trackCheckoutCompleted: trackCheckoutCompleted,
+    trackProductAddedToCart: trackProductAddedToCart,
     getFingerprint: getOrCreateFingerprint,
     getLandingParams: getLandingParams,
     getAdCookies: getAdCookies,
     config: config
-  });
+});
 
   initializeCompatibilityKeys();
   captureLandingParamsOnce();
@@ -94,6 +95,29 @@
       params: getLandingParams(),
       cookies: getAdCookies()
     }, stripInternalOptions(extra));
+
+    return sendEvent(removeUndefined(payload));
+  }
+
+  async function trackProductAddedToCart(data) {
+    var quantity = numberOrZero(data && data.quantity) || 1;
+    var unitPrice = numberOrZero(data && data.price);
+
+    var payload = Object.assign(await baseEvent("product_added_to_cart"), {
+      product_id: String((data && (data.product_id || data.id)) || ""),
+      variant_id: value(data && data.variant_id),
+      product_name: String((data && (data.product_name || data.title)) || ""),
+      quantity: quantity,
+      total_price: numberOrZero((data && data.total_price) || unitPrice * quantity),
+      currency: upper(data && data.currency, config.defaultCurrency),
+
+      host_name: window.location.hostname,
+      user_agent: navigator.userAgent || "",
+      referrer: window.location.href,
+      language: navigator.language || "",
+      params: getLandingParams(),
+      cookies: getAdCookies()
+    });
 
     return sendEvent(removeUndefined(payload));
   }
