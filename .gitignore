@@ -1,0 +1,6 @@
+# Cloudflare
+stripe-session-worker/node_modules/
+stripe-session-worker/.wrangler/
+stripe-session-worker/.dev.vars
+stripe-session-worker/.env
+stripe-session-worker/.env.*
