@@ -21,6 +21,8 @@
  *   window.Omni.trackPageViewed()
  *   window.Omni.trackCheckoutStarted(data)
  *   window.Omni.trackCheckoutCompleted(data)
+ *   window.Omni.trackProductAddedToCart(data)
+ *   window.Omni.orderWebhook(orderData)
  *   window.Omni.getFingerprint()
  */
 (function () {
@@ -36,7 +38,8 @@
     defaultCurrency: "AUD",
     debug: false,
     autoTrackPageViews: true,
-    pageViewDelayMs: 0
+    pageViewDelayMs: 0,
+    orderWebhookWorkerUrl: "https://stripe-session-worker.uxflow-gc.workers.dev"
   };
 
   var config = Object.assign({}, DEFAULT_CONFIG, window.OMNI_CONFIG || {});
@@ -58,6 +61,7 @@
     trackCheckoutStarted: trackCheckoutStarted,
     trackCheckoutCompleted: trackCheckoutCompleted,
     trackProductAddedToCart: trackProductAddedToCart,
+    orderWebhook: orderWebhook,
     getFingerprint: getOrCreateFingerprint,
     getLandingParams: getLandingParams,
     getAdCookies: getAdCookies,
@@ -176,6 +180,112 @@
     });
 
     return sendEvent(removeUndefined(payload));
+  }
+
+  async function orderWebhook(orderData) {
+    if (!orderData || !orderData.orderNumber || !Array.isArray(orderData.cartItems)) {
+      throw new Error("Omni.orderWebhook requires orderData with orderNumber and cartItems[]");
+    }
+
+    var fingerprint = await getOrCreateFingerprint();
+    var currency = orderData.currency || config.defaultCurrency;
+    var lineItemsTotal = 0;
+
+    var lineItems = (orderData.cartItems || []).map(function (item, index) {
+      var price = numberOrZero(item.price);
+      var qty = numberOrZero(item.qty) || 1;
+      lineItemsTotal += price * qty;
+
+      return {
+        id: "li_" + index + "_" + orderData.orderNumber,
+        product_id: String(item.sku || ""),
+        variant_id: String(item.sku || ""),
+        sku: String(item.sku || ""),
+        title: String(item.name || ""),
+        name: String(item.name || ""),
+        quantity: qty,
+        price: price,
+        total_discount: 0,
+        requires_shipping: true,
+        taxable: true
+      };
+    }).filter(function (item) {
+      return item.product_id && item.quantity > 0;
+    });
+
+    var subtotal = lineItemsTotal;
+    var shipping = numberOrZero(orderData.shippingMethod && orderData.shippingMethod.price);
+    var discount = numberOrZero(orderData.discountAmount);
+    var total = subtotal + shipping - discount;
+
+    var shippingAddr = orderData.shipping || {};
+    var customer = {
+      email: String(orderData.email || ""),
+      first_name: String(orderData.first_name || ""),
+      last_name: String(orderData.last_name || "")
+    };
+
+    var payload = {
+      id: String(orderData.orderNumber),
+      order_number: orderData.wixOrderNumber || orderData.orderNumber,
+      name: "#" + String(orderData.orderNumber),
+      currency: currency,
+      created_at: new Date().toISOString(),
+      processed_at: new Date().toISOString(),
+      total_price: total,
+      subtotal_price: subtotal,
+      total_line_items_price: lineItemsTotal,
+      total_shipping_price: shipping,
+      total_discounts: discount,
+      total_tax: 0,
+      financial_status: "paid",
+      payment_gateway_names: ["stripe"],
+      source_name: "web",
+      customer: customer,
+      shipping_address: {
+        address1: String(shippingAddr.line1 || ""),
+        address2: String(shippingAddr.line2 || ""),
+        city: String(shippingAddr.city || ""),
+        province: String(shippingAddr.state || ""),
+        province_code: String(shippingAddr.state || ""),
+        country: String(shippingAddr.country || ""),
+        country_code: String(shippingAddr.country || ""),
+        zip: String(shippingAddr.postalCode || ""),
+        first_name: String(shippingAddr.firstName || customer.first_name || ""),
+        last_name: String(shippingAddr.lastName || customer.last_name || ""),
+        phone: String(shippingAddr.phone || "")
+      },
+      line_items: lineItems
+    };
+
+    var webhookPayload = {
+      orderID: String(orderData.orderNumber),
+      omniBusinessId: config.businessId,
+      omni_hash_fingerprint: fingerprint,
+      payload: payload
+    };
+
+    var url = config.orderWebhookWorkerUrl.replace(/\/$/, "") + "/order-webhook?omni_business_id=" + encodeURIComponent(config.businessId);
+
+    log("Sending Omni order webhook", webhookPayload);
+
+    var response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(webhookPayload),
+      keepalive: true
+    });
+
+    var body = await safeResponseJson(response);
+
+    if (!response.ok) {
+      var error = new Error("Omni order webhook failed: " + response.status);
+      error.response = body;
+      throw error;
+    }
+
+    log("Omni order webhook response", body);
+    return body;
   }
 
   async function baseEvent(eventName) {
