@@ -5,7 +5,7 @@ document.addEventListener("DOMContentLoaded", function () {
   }
 
   if (globalThis.orderConfirmationData) {
-    sendOrderWebhook(globalThis.orderConfirmationData);
+    sendCheckoutCompletedFromData(globalThis.orderConfirmationData);
     return;
   }
 
@@ -68,33 +68,71 @@ document.addEventListener("DOMContentLoaded", function () {
   sendCheckoutCompleted();
 });
 
-async function sendOrderWebhook(orderData) {
-  const dedupeKey = "omni_order_webhook_" + orderData.orderNumber;
+async function sendCheckoutCompletedFromData(orderData, retryCount) {
+  retryCount = retryCount || 0;
+
+  const dedupeKey = "omni_checkout_completed_" + orderData.orderNumber;
 
   if (localStorage.getItem(dedupeKey) === "1") {
-    console.log("Order webhook already sent for", orderData.orderNumber);
+    console.log("checkout_completed already sent for", orderData.orderNumber);
     return;
   }
 
-  for (let attempt = 0; attempt < 3; attempt++) {
-    try {
-      await window.Omni.orderWebhook(orderData);
-      localStorage.setItem(dedupeKey, "1");
-      console.log("Omni order webhook sent", orderData.orderNumber);
-      return;
-    } catch (error) {
-      console.error(
-        "Order webhook attempt " + (attempt + 1) + " failed",
-        error
-      );
+  var lineTotal = 0;
+  for (var i = 0; i < (orderData.cartItems || []).length; i++) {
+    var item = orderData.cartItems[i];
+    lineTotal += (item.price || 0) * (item.qty || 1);
+  }
 
-      if (attempt < 2) {
-        const delay = (attempt + 1) * 2000;
-        console.log("Retrying order webhook in " + (delay / 1000) + "s...");
-        await new Promise(function (resolve) { setTimeout(resolve, delay); });
-      } else {
-        console.error("Order webhook permanently failed after 3 attempts");
-      }
+  var shipping = (orderData.shippingMethod && orderData.shippingMethod.price) || 0;
+  var discount = orderData.discountAmount || 0;
+
+  var items = (orderData.cartItems || []).map(function (item) {
+    return {
+      product_id: item.sku || "",
+      variant_id: item.sku || "",
+      product_name: item.name || "",
+      quantity: item.qty || 1,
+      price: item.price || 0
+    };
+  });
+
+  var payload = {
+    order_id: orderData.orderNumber,
+    total: lineTotal + shipping - discount,
+    subtotal: lineTotal,
+    currency: orderData.currency || "",
+    email: orderData.email || "",
+    first_name: orderData.first_name || "",
+    last_name: orderData.last_name || "",
+    city: (orderData.shipping && orderData.shipping.city) || "",
+    country: (orderData.shipping && orderData.shipping.country) || "",
+    state: (orderData.shipping && orderData.shipping.state) || "",
+    payment_method: "stripe",
+    shipping_amount: shipping,
+    discount_code: "",
+    tax_amount: 0,
+    items: items
+  };
+
+  try {
+    await window.Omni.trackCheckoutCompleted(payload);
+    localStorage.setItem(dedupeKey, "1");
+    console.log("Omni checkout_completed sent", orderData.orderNumber);
+  } catch (error) {
+    console.error(
+      "checkout_completed attempt " + (retryCount + 1) + " failed",
+      error
+    );
+
+    if (retryCount < 2) {
+      var delay = (retryCount + 1) * 2000;
+      console.log("Retrying checkout_completed in " + (delay / 1000) + "s...");
+      setTimeout(function () {
+        sendCheckoutCompletedFromData(orderData, retryCount + 1);
+      }, delay);
+    } else {
+      console.error("checkout_completed permanently failed after 3 attempts");
     }
   }
 }
