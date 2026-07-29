@@ -157,9 +157,27 @@ async function handleWebflowOrderWebhook(request, env) {
     return json({ error: "Missing omni_business_id query parameter" }, 400);
   }
 
+  const site = (url.searchParams.get("site") || "").toLowerCase();
+  const secretKey = env["WEBFLOW_WEBHOOK_SECRET_" + site.toUpperCase()];
+
+  if (!secretKey) {
+    return json({ error: "No webhook secret configured for site: " + site }, 500);
+  }
+
+  const rawBody = await request.text();
+  const signature = request.headers.get("x-webflow-signature") || "";
+
+  if (!signature) {
+    return json({ error: "Missing x-webflow-signature header" }, 401);
+  }
+
+  if (!(await verifyWebflowSignature(rawBody, signature, secretKey))) {
+    return json({ error: "Invalid webhook signature" }, 401);
+  }
+
   let body;
   try {
-    body = await request.json();
+    body = JSON.parse(rawBody);
   } catch (_error) {
     return json({ error: "Invalid JSON body" }, 400);
   }
@@ -291,6 +309,35 @@ function parseAmount(value) {
   if (value === undefined || value === null || value === "") return 0;
   const num = Number(value);
   return Number.isFinite(num) ? num : 0;
+}
+
+async function verifyWebflowSignature(rawBody, signature, secret) {
+  try {
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(secret),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["verify"]
+    );
+    return await crypto.subtle.verify(
+      "HMAC",
+      key,
+      hexToBytes(signature),
+      encoder.encode(rawBody)
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
 }
 
 function getAllowedOrigins(env) {
