@@ -9,64 +9,60 @@ document.addEventListener("DOMContentLoaded", function () {
     return;
   }
 
-  const params = new URLSearchParams(window.location.search);
-  const sessionId = params.get("session_id");
-
-  if (!sessionId) {
-    console.warn("No order confirmation data or Stripe session_id found");
+  const orderId = new URLSearchParams(window.location.search).get("orderId");
+  if (!orderId) {
+    console.warn("Omni: no orderId in URL");
     return;
   }
 
-  const dedupeKey = `omni_checkout_completed_${sessionId}`;
+  const cart =
+    window.CartSnapshot &&
+    typeof window.CartSnapshot.toCheckoutPayload === "function"
+      ? window.CartSnapshot.toCheckoutPayload()
+      : null;
 
-  if (localStorage.getItem(dedupeKey) === "1") {
+  if (!cart || !Array.isArray(cart.items) || !cart.items.length) {
+    console.warn("Omni: CartSnapshot.toCheckoutPayload() unavailable");
+    return;
+  }
+
+  const orderData = {
+    order_id: orderId,
+    total: readAmount("data-order-total", cart.total_price),
+    subtotal: readAmount("data-order-subtotal", cart.total_price),
+    currency: cart.currency || "",
+    email: readText("data-customer-email"),
+    first_name: readText("data-customer-first-name"),
+    city: readText("data-customer-city"),
+    country: readText("data-customer-country"),
+    shipping_amount: readAmount("data-order-shipping", 0),
+    payment_method: "stripe",
+    items: cart.items
+  };
+
+  const key = "omni_checkout_completed_" + orderId;
+
+  if (localStorage.getItem(key) === "1") {
     console.log("checkout_completed already sent");
     return;
   }
 
-  const workerUrl = "https://stripe-session-worker.uxflow-gc.workers.dev/stripe-session?session_id=" + encodeURIComponent(sessionId);
-
-  async function sendCheckoutCompleted(retryCount = 0) {
-    try {
-      const response = await fetch(workerUrl);
-
-      if (!response.ok) {
-        throw new Error(`Worker returned ${response.status}`);
-      }
-
-      const order = await response.json();
-
-      await window.Omni.trackCheckoutCompleted(order);
-
-      localStorage.setItem(dedupeKey, "1");
-
-      console.log("Omni checkout_completed sent", order.order_id);
-    } catch (error) {
-      console.error(
-        `checkout_completed attempt ${retryCount + 1} failed`,
-        error
-      );
-
-      if (retryCount < 2) {
-        const delay = (retryCount + 1) * 2000;
-
-        console.log(
-          `Retrying checkout_completed in ${delay / 1000}s...`
-        );
-
-        setTimeout(function () {
-          sendCheckoutCompleted(retryCount + 1);
-        }, delay);
-      } else {
-        console.error(
-          "checkout_completed permanently failed after 3 attempts"
-        );
-      }
-    }
-  }
-
-  sendCheckoutCompleted();
+  sendCheckoutCompleted(orderData, key, orderId);
 });
+
+function readText(attr) {
+  const el = document.querySelector("[" + attr + "]");
+  if (!el) return "";
+  const v = (el.getAttribute(attr) || "").trim();
+  return v ? v : (el.textContent || "").trim();
+}
+
+function readAmount(attr, fallback) {
+  const raw = readText(attr);
+  if (!raw) return fallback;
+  const num = parseFloat(raw.replace(/[^0-9.\-]/g, ""));
+  return Number.isFinite(num) ? num : fallback;
+}
 
 async function sendCheckoutCompletedFromData(orderData, retryCount) {
   retryCount = retryCount || 0;
