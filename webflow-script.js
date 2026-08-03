@@ -119,6 +119,7 @@ async function sendCheckoutCompletedFromData(orderData, retryCount) {
     await window.Omni.trackCheckoutCompleted(payload);
     localStorage.setItem(dedupeKey, "1");
     console.log("Omni checkout_completed sent", orderData.orderNumber);
+    sendOrderWebhookFromData(orderData);
   } catch (error) {
     console.error(
       "checkout_completed attempt " + (retryCount + 1) + " failed",
@@ -133,6 +134,38 @@ async function sendCheckoutCompletedFromData(orderData, retryCount) {
       }, delay);
     } else {
       console.error("checkout_completed permanently failed after 3 attempts");
+    }
+  }
+}
+
+async function sendOrderWebhookFromData(orderData, retryCount) {
+  retryCount = retryCount || 0;
+
+  const dedupeKey = "omni_order_webhook_" + orderData.orderNumber;
+
+  if (localStorage.getItem(dedupeKey) === "1") {
+    console.log("order webhook already sent for", orderData.orderNumber);
+    return;
+  }
+
+  try {
+    await window.Omni.orderWebhook(orderData);
+    localStorage.setItem(dedupeKey, "1");
+    console.log("Omni order webhook sent", orderData.orderNumber);
+  } catch (error) {
+    console.error(
+      "order webhook attempt " + (retryCount + 1) + " failed",
+      error
+    );
+
+    if (retryCount < 2) {
+      var delay = (retryCount + 1) * 2000;
+      console.log("Retrying order webhook in " + (delay / 1000) + "s...");
+      setTimeout(function () {
+        sendOrderWebhookFromData(orderData, retryCount + 1);
+      }, delay);
+    } else {
+      console.error("order webhook permanently failed after 3 attempts");
     }
   }
 }

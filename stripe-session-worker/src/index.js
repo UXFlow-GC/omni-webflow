@@ -8,14 +8,11 @@
  * Learn more at https://developers.cloudflare.com/workers/
  */
 
+const RESERVE_ORDER_NUMBER_URL = "https://us-central1-mclellanhill-gcp.cloudfunctions.net/onlineCheckoutLink/shopifyReserveOrderNumber";
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-
-    if (url.pathname === "/webflow-order-webhook") {
-      return handleWebflowOrderWebhook(request, env);
-    }
-
     const origin = request.headers.get("Origin") || "";
     const allowedOrigins = getAllowedOrigins(env);
 
@@ -36,12 +33,16 @@ export default {
       return json({ error: "Origin not allowed" }, 403, corsHeaders);
     }
 
-    if (url.pathname === "/stripe-session") {
-      return handleStripeSession(request, url, env, corsHeaders);
+    if (url.pathname === "/webflow-order-webhook") {
+      return handleWebflowOrderWebhook(request, env);
     }
 
     if (url.pathname === "/order-webhook") {
       return handleOrderWebhook(request, env, corsHeaders);
+    }
+
+    if (url.pathname === "/stripe-session") {
+      return handleStripeSession(request, url, env, corsHeaders);
     }
 
     return json({ error: "Not found" }, 404, corsHeaders);
@@ -157,49 +158,31 @@ async function handleWebflowOrderWebhook(request, env) {
     return json({ error: "Missing omni_business_id query parameter" }, 400);
   }
 
-  const site = (url.searchParams.get("site") || "").toLowerCase();
-  const secretKey = env["WEBFLOW_WEBHOOK_SECRET_" + site.toUpperCase()];
-
-  if (!secretKey) {
-    return json({ error: "No webhook secret configured for site: " + site }, 500);
-  }
-
-  const rawBody = await request.text();
-  const signature = request.headers.get("x-webflow-signature") || "";
-
-  if (!signature) {
-    return json({ error: "Missing x-webflow-signature header" }, 401);
-  }
-
-  if (!(await verifyWebflowSignature(rawBody, signature, secretKey))) {
-    return json({ error: "Invalid webhook signature" }, 401);
-  }
-
   let body;
   try {
-    body = JSON.parse(rawBody);
+    body = await request.json();
   } catch (_error) {
     return json({ error: "Invalid JSON body" }, 400);
   }
 
-  if (body.triggerType !== "ecomm_new_order") {
-    return json({ error: "Unsupported triggerType: " + body.triggerType }, 400);
-  }
-
   const p = body.payload || {};
 
-  if (!p.orderId) {
-    return json({ error: "Missing payload.orderId" }, 400);
+  const storeMarket = (url.searchParams.get("site") || "").toUpperCase();
+  const paymentIntentId = p.stripeDetails?.paymentIntentId || "";
+
+  let orderNumber = paymentIntentId ? await reserveOrderNumber(paymentIntentId, storeMarket, env) : p.orderId;
+  if (!orderNumber) {
+    orderNumber = p.orderId
   }
 
-  const totalPrice = parseAmount(p.totals?.total?.value);
-  const subtotal = parseAmount(p.totals?.subtotal?.value);
+  const totalPrice = centsToMajor(p.totals?.total?.value);
+  const subtotal = centsToMajor(p.totals?.subtotal?.value);
   const currency = (p.totals?.total?.unit || "AUD").toUpperCase();
 
   let shipping = 0, tax = 0, discount = 0;
   if (Array.isArray(p.totals?.extras)) {
     for (const extra of p.totals.extras) {
-      const amount = parseAmount(extra.price?.value);
+      const amount = centsToMajor(extra.price?.value);
       if (extra.type === "shipping") shipping += amount;
       else if (extra.type === "tax") tax += amount;
       else if (extra.type === "discount" || extra.type === "discount-shipping") discount += Math.abs(amount);
@@ -218,12 +201,8 @@ async function handleWebflowOrderWebhook(request, env) {
       variant_id: item.variantId || item.productId || "",
       sku: item.variantSKU || "",
       title: item.productName || "",
-      name: (item.productName || "") + (item.variantName ? " - " + item.variantName : ""),
       quantity: item.count || 1,
-      price: parseAmount(item.variantPrice?.value),
-      total_discount: 0,
-      requires_shipping: true,
-      taxable: true
+      price: centsToMajor(item.variantPrice?.value)
     };
   }).filter(function (item) {
     return item.product_id && item.quantity > 0;
@@ -232,13 +211,13 @@ async function handleWebflowOrderWebhook(request, env) {
   const shippingAddr = p.shippingAddress || {};
 
   const omniPayload = {
-    orderID: String(p.orderId),
+    orderID: orderNumber,
     omniBusinessId: omniBusinessId,
-    omni_hash_fingerprint: "",
+    omni_hash_fingerprint: p.omniHashFingerprint || "",
     payload: {
-      id: String(p.orderId),
-      order_number: p.orderId,
-      name: "#" + String(p.orderId),
+      id: orderNumber,
+      order_number: orderNumber,
+      name: "#" + orderNumber,
       currency: currency,
       created_at: p.acceptedOn || new Date().toISOString(),
       processed_at: p.acceptedOn || new Date().toISOString(),
@@ -305,39 +284,31 @@ function mapWebflowStatus(status) {
   return map[status] || "paid";
 }
 
-function parseAmount(value) {
-  if (value === undefined || value === null || value === "") return 0;
-  const num = Number(value);
-  return Number.isFinite(num) ? num : 0;
-}
+async function reserveOrderNumber(paymentIntentId, storeMarket, env) {
+  const response = await fetch(RESERVE_ORDER_NUMBER_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      paymentIntentId,
+      storeMarket,
+      secret: env.RESERVE_ORDER_NUMBER_SECRET
+    })
+  });
 
-async function verifyWebflowSignature(rawBody, signature, secret) {
-  try {
-    const encoder = new TextEncoder();
-    const key = await crypto.subtle.importKey(
-      "raw",
-      encoder.encode(secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["verify"]
-    );
-    return await crypto.subtle.verify(
-      "HMAC",
-      key,
-      hexToBytes(signature),
-      encoder.encode(rawBody)
-    );
-  } catch (_error) {
-    return false;
-  }
-}
+  if (!response.ok) return null;
 
-function hexToBytes(hex) {
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let i = 0; i < hex.length; i += 2) {
-    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  const text = (await response.text()).trim();
+  if (!text.length) return null;
+  if (text.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text);
+      const orderNumber = String(parsed?.orderNumber ?? "").trim();
+      return orderNumber || null;
+    } catch (_error) {
+      return text;
+    }
   }
-  return bytes;
+  return text;
 }
 
 function getAllowedOrigins(env) {
