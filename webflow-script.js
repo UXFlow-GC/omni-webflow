@@ -39,7 +39,6 @@ document.addEventListener("DOMContentLoaded", async function () {
   await sendCheckoutCompletedFromFallback();
 });
 
-
 function waitFor(getValue, timeout = 15000, interval = 150) {
   return new Promise(function (resolve) {
     const startedAt = Date.now();
@@ -69,7 +68,6 @@ function waitFor(getValue, timeout = 15000, interval = 150) {
     check();
   });
 }
-
 
 async function sendCheckoutCompletedFromFallback() {
   const orderId = new URLSearchParams(window.location.search).get("orderId");
@@ -121,7 +119,6 @@ async function sendCheckoutCompletedFromFallback() {
     console.error("Fallback checkout_completed failed", error);
   }
 }
-
 
 async function sendCheckoutCompletedFromData(orderData, retryCount = 0) {
   const orderNumber = orderData?.orderNumber;
@@ -226,7 +223,6 @@ async function sendCheckoutCompletedFromData(orderData, retryCount = 0) {
   }
 }
 
-
 async function sendOrderWebhookFromData(orderData, retryCount = 0) {
   if (
     !window.Omni ||
@@ -285,7 +281,6 @@ async function sendOrderWebhookFromData(orderData, retryCount = 0) {
   }
 }
 
-
 function readText(attr) {
   const el = document.querySelector("[" + attr + "]");
 
@@ -297,7 +292,6 @@ function readText(attr) {
 
   return value || (el.textContent || "").trim();
 }
-
 
 function readAmount(attr, fallback = 0) {
   const raw = readText(attr);
@@ -315,7 +309,6 @@ function readAmount(attr, fallback = 0) {
     : fallback;
 }
 
-
 function toNumber(value, fallback = 0) {
   const number = Number(value);
 
@@ -324,16 +317,13 @@ function toNumber(value, fallback = 0) {
     : fallback;
 }
 
-
 function getCheckoutDedupeKey(orderId) {
   return "omni_checkout_completed_" + orderId;
 }
 
-
 function getWebhookDedupeKey(orderId) {
   return "omni_order_webhook_" + orderId;
 }
-
 
 function hasBeenSent(key) {
   try {
@@ -343,7 +333,6 @@ function hasBeenSent(key) {
     return false;
   }
 }
-
 
 function markAsSent(key) {
   try {
