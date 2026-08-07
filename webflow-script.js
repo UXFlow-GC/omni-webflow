@@ -1,20 +1,24 @@
-document.addEventListener("DOMContentLoaded", function () {
+document.addEventListener("DOMContentLoaded", async function () {
   const [omni, orderConfirmationData] = await Promise.all([
     waitFor(function () {
-      return window.Omni &&
+      return (
+        window.Omni &&
         typeof window.Omni.trackCheckoutCompleted === "function"
           ? window.Omni
-          : null;
+          : null
+      );
     }, 15000, 150),
 
     waitFor(function () {
       const data = globalThis.orderConfirmationData;
 
-      return data &&
+      return (
+        data &&
         data.orderNumber &&
         Array.isArray(data.cartItems)
           ? data
-          : null;
+          : null
+      );
     }, 15000, 150)
   ]);
 
@@ -28,8 +32,48 @@ document.addEventListener("DOMContentLoaded", function () {
     return;
   }
 
-  // Fallback to the existing checkout-page data.
+  console.warn(
+    "orderConfirmationData not available after 15 seconds, using fallback"
+  );
+
+  await sendCheckoutCompletedFromFallback();
+});
+
+
+function waitFor(getValue, timeout = 15000, interval = 150) {
+  return new Promise(function (resolve) {
+    const startedAt = Date.now();
+
+    function check() {
+      let value = null;
+
+      try {
+        value = getValue();
+      } catch (error) {
+        console.warn("waitFor check failed", error);
+      }
+
+      if (value) {
+        resolve(value);
+        return;
+      }
+
+      if (Date.now() - startedAt >= timeout) {
+        resolve(null);
+        return;
+      }
+
+      setTimeout(check, interval);
+    }
+
+    check();
+  });
+}
+
+
+async function sendCheckoutCompletedFromFallback() {
   const orderId = new URLSearchParams(window.location.search).get("orderId");
+
   if (!orderId) {
     console.warn("Omni: no orderId in URL");
     return;
@@ -48,8 +92,8 @@ document.addEventListener("DOMContentLoaded", function () {
 
   const orderData = {
     order_id: orderId,
-    total: readAmount("data-order-total", cart.total_price),
-    subtotal: readAmount("data-order-subtotal", cart.total_price),
+    total: readAmount("data-order-total", toNumber(cart.total_price)),
+    subtotal: readAmount("data-order-subtotal", toNumber(cart.total_price)),
     currency: cart.currency || "",
     email: readText("data-customer-email"),
     first_name: readText("data-customer-first-name"),
@@ -60,106 +104,96 @@ document.addEventListener("DOMContentLoaded", function () {
     items: cart.items
   };
 
-  const key = "omni_checkout_completed_" + orderId;
+  const dedupeKey = getCheckoutDedupeKey(orderId);
 
-  if (localStorage.getItem(key) === "1") {
-    console.log("checkout_completed already sent");
+  if (hasBeenSent(dedupeKey)) {
+    console.log("checkout_completed already sent for", orderId);
     return;
   }
 
-  sendCheckoutCompleted(orderData, key, orderId);
-});
+  try {
+    await window.Omni.trackCheckoutCompleted(orderData);
 
-function waitFor(getValue, timeout = 15000, interval = 150) {
-  return new Promise(function (resolve) {
-    const start = Date.now();
+    markAsSent(dedupeKey);
 
-    function check() {
-      const value = getValue();
-
-      if (value) {
-        resolve(value);
-        return;
-      }
-
-      if (Date.now() - start >= timeout) {
-        resolve(null);
-        return;
-      }
-
-      setTimeout(check, interval);
-    }
-
-    check();
-  });
+    console.log("Omni checkout_completed sent", orderId);
+  } catch (error) {
+    console.error("Fallback checkout_completed failed", error);
+  }
 }
 
-function readText(attr) {
-  const el = document.querySelector("[" + attr + "]");
-  if (!el) return "";
-  const v = (el.getAttribute(attr) || "").trim();
-  return v ? v : (el.textContent || "").trim();
-}
 
-function readAmount(attr, fallback) {
-  const raw = readText(attr);
-  if (!raw) return fallback;
-  const num = parseFloat(raw.replace(/[^0-9.\-]/g, ""));
-  return Number.isFinite(num) ? num : fallback;
-}
+async function sendCheckoutCompletedFromData(orderData, retryCount = 0) {
+  const orderNumber = orderData?.orderNumber;
 
-async function sendCheckoutCompletedFromData(orderData, retryCount) {
-  retryCount = retryCount || 0;
-
-  const dedupeKey = "omni_checkout_completed_" + orderData.orderNumber;
-
-  if (localStorage.getItem(dedupeKey) === "1") {
-    console.log("checkout_completed already sent for", orderData.orderNumber);
+  if (!orderNumber) {
+    console.warn("Omni: orderConfirmationData has no orderNumber");
     return;
   }
 
-  var lineTotal = 0;
-  for (var i = 0; i < (orderData.cartItems || []).length; i++) {
-    var item = orderData.cartItems[i];
-    lineTotal += (item.price || 0) * (item.qty || 1);
+  const dedupeKey = getCheckoutDedupeKey(orderNumber);
+
+  if (hasBeenSent(dedupeKey)) {
+    console.log("checkout_completed already sent for", orderNumber);
+
+    // Still attempt webhook independently.
+    await sendOrderWebhookFromData(orderData);
+
+    return;
   }
 
-  var shipping = (orderData.shippingMethod && orderData.shippingMethod.price) || 0;
-  var discount = orderData.discountAmount || 0;
+  const cartItems = Array.isArray(orderData.cartItems)
+    ? orderData.cartItems
+    : [];
 
-  var items = (orderData.cartItems || []).map(function (item) {
+  const subtotal = cartItems.reduce(function (total, item) {
+    return (
+      total +
+      toNumber(item.price) *
+        toNumber(item.qty, 1)
+    );
+  }, 0);
+
+  const shipping = toNumber(orderData.shippingMethod?.price);
+  const discount = toNumber(orderData.discountAmount);
+
+  const items = cartItems.map(function (item) {
     return {
       product_id: item.sku || "",
       variant_id: item.sku || "",
       product_name: item.name || "",
-      quantity: item.qty || 1,
-      price: item.price || 0
+      quantity: toNumber(item.qty, 1),
+      price: toNumber(item.price)
     };
   });
 
-  var payload = {
-    order_id: orderData.orderNumber,
-    total: lineTotal + shipping - discount,
-    subtotal: lineTotal,
+  const payload = {
+    order_id: orderNumber,
+    total: subtotal + shipping - discount,
+    subtotal: subtotal,
     currency: orderData.currency || "",
     email: orderData.email || "",
     first_name: orderData.first_name || "",
     last_name: orderData.last_name || "",
-    city: (orderData.shipping && orderData.shipping.city) || "",
-    country: (orderData.shipping && orderData.shipping.country) || "",
-    state: (orderData.shipping && orderData.shipping.state) || "",
+    city: orderData.shipping?.city || "",
+    country: orderData.shipping?.country || "",
+    state: orderData.shipping?.state || "",
     payment_method: "stripe",
     shipping_amount: shipping,
-    discount_code: "",
-    tax_amount: 0,
+    discount_code: orderData.discountCode || "",
+    tax_amount: toNumber(orderData.taxAmount),
     items: items
   };
 
   try {
     await window.Omni.trackCheckoutCompleted(payload);
-    localStorage.setItem(dedupeKey, "1");
-    console.log("Omni checkout_completed sent", orderData.orderNumber);
-    sendOrderWebhookFromData(orderData);
+
+    markAsSent(dedupeKey);
+
+    console.log("Omni checkout_completed sent", orderNumber);
+
+    // Independent from checkout_completed success/failure retries.
+    await sendOrderWebhookFromData(orderData);
   } catch (error) {
     console.error(
       "checkout_completed attempt " + (retryCount + 1) + " failed",
@@ -167,31 +201,61 @@ async function sendCheckoutCompletedFromData(orderData, retryCount) {
     );
 
     if (retryCount < 2) {
-      var delay = (retryCount + 1) * 2000;
-      console.log("Retrying checkout_completed in " + (delay / 1000) + "s...");
+      const delay = (retryCount + 1) * 2000;
+
+      console.log(
+        "Retrying checkout_completed in " + delay / 1000 + "s..."
+      );
+
       setTimeout(function () {
-        sendCheckoutCompletedFromData(orderData, retryCount + 1);
+        sendCheckoutCompletedFromData(
+          orderData,
+          retryCount + 1
+        );
       }, delay);
-    } else {
-      console.error("checkout_completed permanently failed after 3 attempts");
+
+      return;
     }
+
+    console.error(
+      "checkout_completed permanently failed after 3 attempts"
+    );
+
+    // Still attempt webhook even if tracking failed.
+    await sendOrderWebhookFromData(orderData);
   }
 }
 
-async function sendOrderWebhookFromData(orderData, retryCount) {
-  retryCount = retryCount || 0;
 
-  const dedupeKey = "omni_order_webhook_" + orderData.orderNumber;
+async function sendOrderWebhookFromData(orderData, retryCount = 0) {
+  if (
+    !window.Omni ||
+    typeof window.Omni.orderWebhook !== "function"
+  ) {
+    console.warn("Omni.orderWebhook unavailable");
+    return;
+  }
 
-  if (localStorage.getItem(dedupeKey) === "1") {
-    console.log("order webhook already sent for", orderData.orderNumber);
+  const orderNumber = orderData?.orderNumber;
+
+  if (!orderNumber) {
+    console.warn("Omni: cannot send webhook without orderNumber");
+    return;
+  }
+
+  const dedupeKey = getWebhookDedupeKey(orderNumber);
+
+  if (hasBeenSent(dedupeKey)) {
+    console.log("order webhook already sent for", orderNumber);
     return;
   }
 
   try {
     await window.Omni.orderWebhook(orderData);
-    localStorage.setItem(dedupeKey, "1");
-    console.log("Omni order webhook sent", orderData.orderNumber);
+
+    markAsSent(dedupeKey);
+
+    console.log("Omni order webhook sent", orderNumber);
   } catch (error) {
     console.error(
       "order webhook attempt " + (retryCount + 1) + " failed",
@@ -199,13 +263,92 @@ async function sendOrderWebhookFromData(orderData, retryCount) {
     );
 
     if (retryCount < 2) {
-      var delay = (retryCount + 1) * 2000;
-      console.log("Retrying order webhook in " + (delay / 1000) + "s...");
+      const delay = (retryCount + 1) * 2000;
+
+      console.log(
+        "Retrying order webhook in " + delay / 1000 + "s..."
+      );
+
       setTimeout(function () {
-        sendOrderWebhookFromData(orderData, retryCount + 1);
+        sendOrderWebhookFromData(
+          orderData,
+          retryCount + 1
+        );
       }, delay);
-    } else {
-      console.error("order webhook permanently failed after 3 attempts");
+
+      return;
     }
+
+    console.error(
+      "order webhook permanently failed after 3 attempts"
+    );
+  }
+}
+
+
+function readText(attr) {
+  const el = document.querySelector("[" + attr + "]");
+
+  if (!el) {
+    return "";
+  }
+
+  const value = (el.getAttribute(attr) || "").trim();
+
+  return value || (el.textContent || "").trim();
+}
+
+
+function readAmount(attr, fallback = 0) {
+  const raw = readText(attr);
+
+  if (!raw) {
+    return fallback;
+  }
+
+  const parsed = parseFloat(
+    raw.replace(/[^0-9.-]/g, "")
+  );
+
+  return Number.isFinite(parsed)
+    ? parsed
+    : fallback;
+}
+
+
+function toNumber(value, fallback = 0) {
+  const number = Number(value);
+
+  return Number.isFinite(number)
+    ? number
+    : fallback;
+}
+
+
+function getCheckoutDedupeKey(orderId) {
+  return "omni_checkout_completed_" + orderId;
+}
+
+
+function getWebhookDedupeKey(orderId) {
+  return "omni_order_webhook_" + orderId;
+}
+
+
+function hasBeenSent(key) {
+  try {
+    return localStorage.getItem(key) === "1";
+  } catch (error) {
+    console.warn("Unable to read localStorage", error);
+    return false;
+  }
+}
+
+
+function markAsSent(key) {
+  try {
+    localStorage.setItem(key, "1");
+  } catch (error) {
+    console.warn("Unable to write localStorage", error);
   }
 }
