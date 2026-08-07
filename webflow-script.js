@@ -1,14 +1,34 @@
 document.addEventListener("DOMContentLoaded", function () {
-  if (!window.Omni) {
-    console.warn("Omni not loaded");
+  const [omni, orderConfirmationData] = await Promise.all([
+    waitFor(function () {
+      return window.Omni &&
+        typeof window.Omni.trackCheckoutCompleted === "function"
+          ? window.Omni
+          : null;
+    }, 15000, 150),
+
+    waitFor(function () {
+      const data = globalThis.orderConfirmationData;
+
+      return data &&
+        data.orderNumber &&
+        Array.isArray(data.cartItems)
+          ? data
+          : null;
+    }, 15000, 150)
+  ]);
+
+  if (!omni) {
+    console.warn("Omni not available after 15 seconds");
     return;
   }
 
-  if (globalThis.orderConfirmationData) {
-    sendCheckoutCompletedFromData(globalThis.orderConfirmationData);
+  if (orderConfirmationData) {
+    await sendCheckoutCompletedFromData(orderConfirmationData);
     return;
   }
 
+  // Fallback to the existing checkout-page data.
   const orderId = new URLSearchParams(window.location.search).get("orderId");
   if (!orderId) {
     console.warn("Omni: no orderId in URL");
@@ -49,6 +69,30 @@ document.addEventListener("DOMContentLoaded", function () {
 
   sendCheckoutCompleted(orderData, key, orderId);
 });
+
+function waitFor(getValue, timeout = 15000, interval = 150) {
+  return new Promise(function (resolve) {
+    const start = Date.now();
+
+    function check() {
+      const value = getValue();
+
+      if (value) {
+        resolve(value);
+        return;
+      }
+
+      if (Date.now() - start >= timeout) {
+        resolve(null);
+        return;
+      }
+
+      setTimeout(check, interval);
+    }
+
+    check();
+  });
+}
 
 function readText(attr) {
   const el = document.querySelector("[" + attr + "]");
